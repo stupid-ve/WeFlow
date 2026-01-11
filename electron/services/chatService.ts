@@ -166,7 +166,7 @@ class ChatService {
   }
 
   /**
-   * 获取会话列表
+   * 获取会话列表（优化：先返回基础数据，不等待联系人信息加载）
    */
   async getSessions(): Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }> {
     try {
@@ -189,8 +189,10 @@ class ChatService {
         return { success: false, error: `会话表异常: ${detail}${tableInfo}${tables}${columns}` }
       }
 
-      // 转换为 ChatSession
+      // 转换为 ChatSession（先加载缓存，但不等待数据库查询）
       const sessions: ChatSession[] = []
+      const now = Date.now()
+      
       for (const row of rows) {
         const username =
           row.username ||
@@ -225,6 +227,15 @@ class ChatService {
         const summary = this.cleanString(row.summary || row.digest || row.last_msg || row.lastMsg || '')
         const lastMsgType = parseInt(row.last_msg_type || row.lastMsgType || '0', 10)
 
+        // 先尝试从缓存获取联系人信息（快速路径）
+        let displayName = username
+        let avatarUrl: string | undefined = undefined
+        const cached = this.avatarCache.get(username)
+        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
+          displayName = cached.displayName || username
+          avatarUrl = cached.avatarUrl
+        }
+
         sessions.push({
           username,
           type: parseInt(row.type || '0', 10),
@@ -233,13 +244,13 @@ class ChatService {
           sortTimestamp: sortTs,
           lastTimestamp: lastTs,
           lastMsgType,
-          displayName: username
+          displayName,
+          avatarUrl
         })
       }
 
-      // 获取联系人信息
-      await this.enrichSessionsWithContacts(sessions)
-
+      // 不等待联系人信息加载，直接返回基础会话列表
+      // 前端可以异步调用 enrichSessionsWithContacts 来补充信息
       return { success: true, sessions }
     } catch (e) {
       console.error('ChatService: 获取会话列表失败:', e)
@@ -248,45 +259,85 @@ class ChatService {
   }
 
   /**
-   * 补充联系人信息
+   * 异步补充会话列表的联系人信息（公开方法，供前端调用）
+   */
+  async enrichSessionsContactInfo(usernames: string[]): Promise<{ 
+    success: boolean
+    contacts?: Record<string, { displayName?: string; avatarUrl?: string }>
+    error?: string 
+  }> {
+    try {
+      if (usernames.length === 0) {
+        return { success: true, contacts: {} }
+      }
+
+      const connectResult = await this.ensureConnected()
+      if (!connectResult.success) {
+        return { success: false, error: connectResult.error }
+      }
+
+      const now = Date.now()
+      const missing: string[] = []
+      const result: Record<string, { displayName?: string; avatarUrl?: string }> = {}
+
+      // 检查缓存
+      for (const username of usernames) {
+        const cached = this.avatarCache.get(username)
+        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
+          result[username] = {
+            displayName: cached.displayName,
+            avatarUrl: cached.avatarUrl
+          }
+        } else {
+          missing.push(username)
+        }
+      }
+
+      // 批量查询缺失的联系人信息
+      if (missing.length > 0) {
+        const [displayNames, avatarUrls] = await Promise.all([
+          wcdbService.getDisplayNames(missing),
+          wcdbService.getAvatarUrls(missing)
+        ])
+
+        for (const username of missing) {
+          const displayName = displayNames.success && displayNames.map ? displayNames.map[username] : undefined
+          const avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[username] : undefined
+          
+          result[username] = { displayName, avatarUrl }
+          
+          // 更新缓存
+          this.avatarCache.set(username, {
+            displayName: displayName || username,
+            avatarUrl,
+            updatedAt: now
+          })
+        }
+      }
+
+      return { success: true, contacts: result }
+    } catch (e) {
+      console.error('ChatService: 补充联系人信息失败:', e)
+      return { success: false, error: String(e) }
+    }
+  }
+
+  /**
+   * 补充联系人信息（私有方法，保持向后兼容）
    */
   private async enrichSessionsWithContacts(sessions: ChatSession[]): Promise<void> {
     if (sessions.length === 0) return
     try {
-      const now = Date.now()
-      const missing: string[] = []
-
-      for (const session of sessions) {
-        const cached = this.avatarCache.get(session.username)
-        if (cached && now - cached.updatedAt < this.avatarCacheTtlMs) {
-          if (cached.displayName) session.displayName = cached.displayName
-          if (cached.avatarUrl) {
-            session.avatarUrl = cached.avatarUrl
-            continue
+      const usernames = sessions.map(s => s.username)
+      const result = await this.enrichSessionsContactInfo(usernames)
+      if (result.success && result.contacts) {
+        for (const session of sessions) {
+          const contact = result.contacts![session.username]
+          if (contact) {
+            if (contact.displayName) session.displayName = contact.displayName
+            if (contact.avatarUrl) session.avatarUrl = contact.avatarUrl
           }
         }
-        missing.push(session.username)
-      }
-
-      if (missing.length === 0) return
-      const missingSet = new Set(missing)
-
-      const [displayNames, avatarUrls] = await Promise.all([
-        wcdbService.getDisplayNames(missing),
-        wcdbService.getAvatarUrls(missing)
-      ])
-
-      for (const session of sessions) {
-        if (!missingSet.has(session.username)) continue
-        const displayName = displayNames.success && displayNames.map ? displayNames.map[session.username] : undefined
-        const avatarUrl = avatarUrls.success && avatarUrls.map ? avatarUrls.map[session.username] : undefined
-        if (displayName) session.displayName = displayName
-        if (avatarUrl) session.avatarUrl = avatarUrl
-        this.avatarCache.set(session.username, {
-          displayName: session.displayName,
-          avatarUrl: session.avatarUrl,
-          updatedAt: now
-        })
       }
     } catch (e) {
       console.error('ChatService: 获取联系人信息失败:', e)

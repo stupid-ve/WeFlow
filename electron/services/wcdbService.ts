@@ -648,8 +648,15 @@ export class WcdbService {
       return { success: false, error: 'WCDB 未连接' }
     }
     try {
+      // 使用 setImmediate 让事件循环有机会处理其他任务，避免长时间阻塞
+      await new Promise(resolve => setImmediate(resolve))
+      
       const outPtr = [null as any]
       const result = this.wcdbGetSessions(this.handle, outPtr)
+      
+      // DLL 调用后再次让出控制权
+      await new Promise(resolve => setImmediate(resolve))
+      
       if (result !== 0 || !outPtr[0]) {
         this.writeLog(`getSessions failed: code=${result}`)
         return { success: false, error: `获取会话失败: ${result}` }
@@ -706,8 +713,15 @@ export class WcdbService {
     }
     if (usernames.length === 0) return { success: true, map: {} }
     try {
+      // 让出控制权，避免阻塞事件循环
+      await new Promise(resolve => setImmediate(resolve))
+      
       const outPtr = [null as any]
       const result = this.wcdbGetDisplayNames(this.handle, JSON.stringify(usernames), outPtr)
+      
+      // DLL 调用后再次让出控制权
+      await new Promise(resolve => setImmediate(resolve))
+      
       if (result !== 0 || !outPtr[0]) {
         return { success: false, error: `获取昵称失败: ${result}` }
       }
@@ -746,8 +760,15 @@ export class WcdbService {
         return { success: true, map: resultMap }
       }
 
+      // 让出控制权，避免阻塞事件循环
+      await new Promise(resolve => setImmediate(resolve))
+      
       const outPtr = [null as any]
       const result = this.wcdbGetAvatarUrls(this.handle, JSON.stringify(toFetch), outPtr)
+      
+      // DLL 调用后再次让出控制权
+      await new Promise(resolve => setImmediate(resolve))
+      
       if (result !== 0 || !outPtr[0]) {
         if (Object.keys(resultMap).length > 0) {
           return { success: true, map: resultMap, error: `获取头像失败: ${result}` }
