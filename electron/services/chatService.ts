@@ -980,6 +980,118 @@ class ChatService {
     }
   }
 
+  //手动查找 media_*.db 文件（当 WCDB DLL 不支持 listMediaDbs 时的 fallback）
+  private async findMediaDbsManually(): Promise<string[]> {
+    try {
+      const dbPath = this.configService.get('dbPath')
+      const myWxid = this.configService.get('myWxid')
+      if (!dbPath || !myWxid) return []
+
+      // 可能的目录结构：
+      // 1. dbPath 直接指向 db_storage: D:\weixin\WeChat Files\wxid_xxx\db_storage
+      // 2. dbPath 指向账号目录: D:\weixin\WeChat Files\wxid_xxx
+      // 3. dbPath 指向 WeChat Files: D:\weixin\WeChat Files
+      // 4. dbPath 指向微信根目录: D:\weixin
+      // 5. dbPath 指向非标准目录: D:\weixin\xwechat_files
+
+      const searchDirs: string[] = []
+
+      // 尝试1: dbPath 本身就是 db_storage
+      if (basename(dbPath).toLowerCase() === 'db_storage') {
+        searchDirs.push(dbPath)
+      }
+
+      // 尝试2: dbPath/db_storage
+      const dbStorage1 = join(dbPath, 'db_storage')
+      if (existsSync(dbStorage1)) {
+        searchDirs.push(dbStorage1)
+      }
+
+      // 尝试3: dbPath/WeChat Files/[wxid]/db_storage
+      const wechatFiles = join(dbPath, 'WeChat Files')
+      if (existsSync(wechatFiles)) {
+        const wxidDir = join(wechatFiles, myWxid)
+        if (existsSync(wxidDir)) {
+          const dbStorage2 = join(wxidDir, 'db_storage')
+          if (existsSync(dbStorage2)) {
+            searchDirs.push(dbStorage2)
+          }
+        }
+      }
+
+      // 尝试4: 如果 dbPath 已经包含 WeChat Files，直接在其中查找
+      if (dbPath.includes('WeChat Files')) {
+        const parts = dbPath.split(path.sep)
+        const wechatFilesIndex = parts.findIndex(p => p === 'WeChat Files')
+        if (wechatFilesIndex >= 0) {
+          const wechatFilesPath = parts.slice(0, wechatFilesIndex + 1).join(path.sep)
+          const wxidDir = join(wechatFilesPath, myWxid)
+          if (existsSync(wxidDir)) {
+            const dbStorage3 = join(wxidDir, 'db_storage')
+            if (existsSync(dbStorage3) && !searchDirs.includes(dbStorage3)) {
+              searchDirs.push(dbStorage3)
+            }
+          }
+        }
+      }
+
+      // 尝试5: 直接尝试 dbPath/[wxid]/db_storage (适用于 xwechat_files 等非标准目录名)
+      const wxidDirDirect = join(dbPath, myWxid)
+      if (existsSync(wxidDirDirect)) {
+        const dbStorage5 = join(wxidDirDirect, 'db_storage')
+        if (existsSync(dbStorage5) && !searchDirs.includes(dbStorage5)) {
+          searchDirs.push(dbStorage5)
+        }
+      }
+
+      // 在所有可能的目录中查找 media_*.db
+      const mediaDbFiles: string[] = []
+      for (const dir of searchDirs) {
+        if (!existsSync(dir)) continue
+
+        // 直接在当前目录查找
+        const entries = readdirSync(dir)
+        for (const entry of entries) {
+          if (entry.toLowerCase().startsWith('media_') && entry.toLowerCase().endsWith('.db')) {
+            const fullPath = join(dir, entry)
+            if (existsSync(fullPath) && statSync(fullPath).isFile()) {
+              if (!mediaDbFiles.includes(fullPath)) {
+                mediaDbFiles.push(fullPath)
+              }
+            }
+          }
+        }
+
+        // 也检查子目录（特别是 message 子目录）
+        for (const entry of entries) {
+          const subDir = join(dir, entry)
+          if (existsSync(subDir) && statSync(subDir).isDirectory()) {
+            try {
+              const subEntries = readdirSync(subDir)
+              for (const subEntry of subEntries) {
+                if (subEntry.toLowerCase().startsWith('media_') && subEntry.toLowerCase().endsWith('.db')) {
+                  const fullPath = join(subDir, subEntry)
+                  if (existsSync(fullPath) && statSync(fullPath).isFile()) {
+                    if (!mediaDbFiles.includes(fullPath)) {
+                      mediaDbFiles.push(fullPath)
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              // 忽略无法访问的子目录
+            }
+          }
+        }
+      }
+
+      return mediaDbFiles
+    } catch (e) {
+      console.error('[ChatService] 手动查找 media 数据库失败:', e)
+      return []
+    }
+  }
+
   private getVoiceLookupCandidates(sessionId: string, msg: Message): string[] {
     const candidates: string[] = []
     const add = (value?: string | null) => {
@@ -1833,13 +1945,20 @@ class ChatService {
       })
 
       // 2. 查找所有的 media_*.db
-      const mediaDbs = await wcdbService.listMediaDbs()
-      if (!mediaDbs.success || !mediaDbs.data) return { success: false, error: '获取媒体库失败' }
-      console.info('[ChatService][Voice] media dbs', mediaDbs.data)
+      let mediaDbs = await wcdbService.listMediaDbs()
+      // Fallback: 如果 WCDB DLL 不支持 listMediaDbs，手动查找
+      if (!mediaDbs.success || !mediaDbs.data || mediaDbs.data.length === 0) {
+        const manualMediaDbs = await this.findMediaDbsManually()
+        if (manualMediaDbs.length > 0) {
+          mediaDbs = { success: true, data: manualMediaDbs }
+        } else {
+          return { success: false, error: '未找到媒体库文件 (media_*.db)' }
+        }
+      }
 
       // 3. 在所有媒体库中查找该消息的语音数据
       let silkData: Buffer | null = null
-      for (const dbPath of mediaDbs.data) {
+      for (const dbPath of (mediaDbs.data || [])) {
         const voiceTable = await this.resolveVoiceInfoTableName(dbPath)
         if (!voiceTable) {
           console.warn('[ChatService][Voice] voice table not found', dbPath)
@@ -2165,7 +2284,7 @@ class ChatService {
             .prepare(`SELECT dir_name FROM ${state.dirTable} WHERE dir_id = ? AND username = ? LIMIT 1`)
             .get(dir2, sessionId) as { dir_name?: string } | undefined
           if (dirRow?.dir_name) dirName = dirRow.dir_name as string
-        } catch {}
+        } catch { }
       }
 
       const fullPath = join(accountDir, dir1, dirName, fileName)
@@ -2173,7 +2292,7 @@ class ChatService {
 
       const withDat = `${fullPath}.dat`
       if (existsSync(withDat)) return withDat
-    } catch {}
+    } catch { }
     return null
   }
 
