@@ -33,11 +33,13 @@ export interface Message {
   isSend: number | null
   senderUsername: string | null
   parsedContent: string
+  content?: string  // 原始消息内容（XML）
   imageMd5?: string
   imageDatName?: string
   emojiCdnUrl?: string
   emojiMd5?: string
   voiceDurationSeconds?: number
+  videoMd5?: string
   // 引用消息
   quotedContent?: string
   quotedSender?: string

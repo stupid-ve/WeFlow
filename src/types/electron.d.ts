@@ -9,6 +9,8 @@ export interface ElectronAPI {
     completeOnboarding: () => Promise<boolean>
     openOnboardingWindow: () => Promise<boolean>
     setTitleBarOverlay: (options: { symbolColor: string }) => void
+    openVideoPlayerWindow: (videoPath: string, videoWidth?: number, videoHeight?: number) => Promise<void>
+    resizeToFitVideo: (videoWidth: number, videoHeight: number) => Promise<void>
   }
   config: {
     get: (key: string) => Promise<unknown>
@@ -106,6 +108,21 @@ export interface ElectronAPI {
     preload: (payloads: Array<{ sessionId?: string; imageMd5?: string; imageDatName?: string }>) => Promise<boolean>
     onUpdateAvailable: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string }) => void) => () => void
     onCacheResolved: (callback: (payload: { cacheKey: string; imageMd5?: string; imageDatName?: string; localPath: string }) => void) => () => void
+  }
+  video: {
+    getVideoInfo: (videoMd5: string) => Promise<{
+      success: boolean
+      exists: boolean
+      videoUrl?: string
+      coverUrl?: string
+      thumbUrl?: string
+      error?: string
+    }>
+    parseVideoMd5: (content: string) => Promise<{
+      success: boolean
+      md5?: string
+      error?: string
+    }>
   }
   analytics: {
     getOverallStatistics: (force?: boolean) => Promise<{
