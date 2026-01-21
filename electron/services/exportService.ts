@@ -721,6 +721,22 @@ class ExportService {
     return '.jpg'
   }
 
+  private getMediaLayout(outputPath: string, options: ExportOptions): {
+    exportMediaEnabled: boolean
+    mediaRootDir: string
+    mediaRelativePrefix: string
+  } {
+    const exportMediaEnabled = options.exportMedia === true &&
+      Boolean(options.exportImages || options.exportVoices || options.exportEmojis)
+    const outputDir = path.dirname(outputPath)
+    const outputBaseName = path.basename(outputPath, path.extname(outputPath))
+    const useSharedMediaLayout = options.sessionLayout === 'shared'
+    const mediaRelativePrefix = useSharedMediaLayout
+      ? path.posix.join('media', outputBaseName)
+      : 'media'
+    return { exportMediaEnabled, mediaRootDir: outputDir, mediaRelativePrefix }
+  }
+
   /**
    * 下载文件
    */
@@ -1145,29 +1161,43 @@ class ExportService {
         phase: 'exporting'
       })
 
-      const chatLabMessages: ChatLabMessage[] = []
-      for (const msg of allMessages) {
-        const memberInfo = collected.memberSet.get(msg.senderUsername)?.member || {
-          platformId: msg.senderUsername,
-          accountName: msg.senderUsername,
-          groupNickname: undefined
-        }
+        const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+        const mediaCache = new Map<string, MediaExportItem | null>()
+        const chatLabMessages: ChatLabMessage[] = []
+        for (const msg of allMessages) {
+          const memberInfo = collected.memberSet.get(msg.senderUsername)?.member || {
+            platformId: msg.senderUsername,
+            accountName: msg.senderUsername,
+            groupNickname: undefined
+          }
 
-        let content = this.parseMessageContent(msg.content, msg.localType)
-        // 如果是语音消息且开启了转文字
-        if (msg.localType === 34 && options.exportVoiceAsText) {
-          content = await this.transcribeVoice(sessionId, String(msg.localId))
-        }
+          let content = this.parseMessageContent(msg.content, msg.localType)
+          if (exportMediaEnabled) {
+            const mediaKey = `${msg.localType}_${msg.localId}`
+            if (!mediaCache.has(mediaKey)) {
+              const mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+                exportImages: options.exportImages,
+                exportVoices: options.exportVoices,
+                exportEmojis: options.exportEmojis,
+                exportVoiceAsText: options.exportVoiceAsText
+              })
+              mediaCache.set(mediaKey, mediaItem)
+            }
+          }
+          if (msg.localType === 34 && options.exportVoiceAsText) {
+            // 如果是语音消息且开启了转文字
+            content = await this.transcribeVoice(sessionId, String(msg.localId))
+          }
 
-        chatLabMessages.push({
-          sender: msg.senderUsername,
-          accountName: memberInfo.accountName,
-          groupNickname: memberInfo.groupNickname,
-          timestamp: msg.createTime,
-          type: this.convertMessageType(msg.localType, msg.content),
-          content: content
-        })
-      }
+          chatLabMessages.push({
+            sender: msg.senderUsername,
+            accountName: memberInfo.accountName,
+            groupNickname: memberInfo.groupNickname,
+            timestamp: msg.createTime,
+            type: this.convertMessageType(msg.localType, msg.content),
+            content: content
+          })
+        }
 
       const avatarMap = options.exportAvatars
         ? await this.exportAvatars(
@@ -1260,22 +1290,41 @@ class ExportService {
         phase: 'preparing'
       })
 
-      const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
-      const allMessages: any[] = []
+        const collected = await this.collectMessages(sessionId, cleanedMyWxid, options.dateRange)
+        const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
+        const mediaCache = new Map<string, MediaExportItem | null>()
+        const allMessages: any[] = []
 
-      for (const msg of collected.rows) {
-        const senderInfo = await this.getContactInfo(msg.senderUsername)
-        const sourceMatch = /<msgsource>[\s\S]*?<\/msgsource>/i.exec(msg.content || '')
-        const source = sourceMatch ? sourceMatch[0] : ''
+        for (const msg of collected.rows) {
+          const senderInfo = await this.getContactInfo(msg.senderUsername)
+          const sourceMatch = /<msgsource>[\s\S]*?<\/msgsource>/i.exec(msg.content || '')
+          const source = sourceMatch ? sourceMatch[0] : ''
 
-        let content = this.parseMessageContent(msg.content, msg.localType)
-        if (msg.localType === 34 && options.exportVoiceAsText) {
-          content = await this.transcribeVoice(sessionId, String(msg.localId))
-        }
+          let content = this.parseMessageContent(msg.content, msg.localType)
+          let mediaItem: MediaExportItem | null = null
+          if (exportMediaEnabled) {
+            const mediaKey = `${msg.localType}_${msg.localId}`
+            if (mediaCache.has(mediaKey)) {
+              mediaItem = mediaCache.get(mediaKey) || null
+            } else {
+              mediaItem = await this.exportMediaForMessage(msg, sessionId, mediaRootDir, mediaRelativePrefix, {
+                exportImages: options.exportImages,
+                exportVoices: options.exportVoices,
+                exportEmojis: options.exportEmojis,
+                exportVoiceAsText: options.exportVoiceAsText
+              })
+              mediaCache.set(mediaKey, mediaItem)
+            }
+          }
+          if (mediaItem) {
+            content = mediaItem.relativePath
+          } else if (msg.localType === 34 && options.exportVoiceAsText) {
+            content = await this.transcribeVoice(sessionId, String(msg.localId))
+          }
 
-        allMessages.push({
-          localId: allMessages.length + 1,
-          createTime: msg.createTime,
+          allMessages.push({
+            localId: allMessages.length + 1,
+            createTime: msg.createTime,
           formattedTime: this.formatTimestamp(msg.createTime),
           type: this.getMessageTypeName(msg.localType),
           localType: msg.localType,
@@ -1499,14 +1548,7 @@ class ExportService {
       const sortedMessages = collected.rows.sort((a, b) => a.createTime - b.createTime)
 
       // 媒体导出设置
-      const exportMediaEnabled = options.exportImages || options.exportVoices || options.exportEmojis
-      const outputDir = path.dirname(outputPath)
-      const outputBaseName = path.basename(outputPath, path.extname(outputPath))
-      const useSharedMediaLayout = options.sessionLayout === 'shared'
-      const mediaRelativePrefix = useSharedMediaLayout
-        ? path.posix.join('media', outputBaseName)
-        : 'media'
-      const mediaRootDir = outputDir
+      const { exportMediaEnabled, mediaRootDir, mediaRelativePrefix } = this.getMediaLayout(outputPath, options)
 
       // 媒体导出缓存
       const mediaCache = new Map<string, MediaExportItem | null>()
