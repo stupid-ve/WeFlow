@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Search, RefreshCw, X, User, Users, MessageSquare, Loader2, FolderOpen, Download, ChevronDown } from 'lucide-react'
 import './ContactsPage.scss'
 
 interface ContactInfo {
@@ -27,6 +27,8 @@ function ContactsPage() {
     const [exportAvatars, setExportAvatars] = useState(true)
     const [exportFolder, setExportFolder] = useState('')
     const [isExporting, setIsExporting] = useState(false)
+    const [showFormatSelect, setShowFormatSelect] = useState(false)
+    const formatDropdownRef = useRef<HTMLDivElement>(null)
 
     // 加载通讯录
     const loadContacts = useCallback(async () => {
@@ -102,6 +104,18 @@ function ContactsPage() {
         setFilteredContacts(filtered)
     }, [searchKeyword, contacts, contactTypes])
 
+    // 点击外部关闭下拉菜单
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target as Node
+            if (showFormatSelect && formatDropdownRef.current && !formatDropdownRef.current.contains(target)) {
+                setShowFormatSelect(false)
+            }
+        }
+        document.addEventListener('mousedown', handleClickOutside)
+        return () => document.removeEventListener('mousedown', handleClickOutside)
+    }, [showFormatSelect])
+
     const getAvatarLetter = (name: string) => {
         if (!name) return '?'
         return [...name][0] || '?'
@@ -173,16 +187,27 @@ function ContactsPage() {
         }
     }
 
+    const exportFormatOptions = [
+        { value: 'json', label: 'JSON', desc: '详细格式，包含完整联系人信息' },
+        { value: 'csv', label: 'CSV (Excel)', desc: '电子表格格式，适合Excel查看' },
+        { value: 'vcf', label: 'VCF (vCard)', desc: '标准名片格式，支持导入手机' }
+    ]
+
+    const getOptionLabel = (value: string) => {
+        return exportFormatOptions.find(opt => opt.value === value)?.label || value
+    }
+
     return (
         <div className="contacts-page">
-            <div className="page-header">
-                <h1>通讯录</h1>
-                <button className="icon-btn" onClick={loadContacts} disabled={isLoading}>
-                    <RefreshCw size={18} className={isLoading ? 'spin' : ''} />
-                </button>
-            </div>
+            {/* 左侧：联系人列表 */}
+            <div className="contacts-panel">
+                <div className="panel-header">
+                    <h2>通讯录</h2>
+                    <button className="icon-btn" onClick={loadContacts} disabled={isLoading}>
+                        <RefreshCw size={18} className={isLoading ? 'spin' : ''} />
+                    </button>
+                </div>
 
-            <div className="contacts-filters">
                 <div className="search-bar">
                     <Search size={16} />
                     <input
@@ -203,7 +228,7 @@ function ContactsPage() {
                         <input
                             type="checkbox"
                             checked={contactTypes.friends}
-                            onChange={e => setContactTypes(prev => ({ ...prev, friends: e.target.checked }))}
+                            onChange={e => setContactTypes({ ...contactTypes, friends: e.target.checked })}
                         />
                         <div className="custom-checkbox"></div>
                         <User size={16} />
@@ -213,7 +238,7 @@ function ContactsPage() {
                         <input
                             type="checkbox"
                             checked={contactTypes.groups}
-                            onChange={e => setContactTypes(prev => ({ ...prev, groups: e.target.checked }))}
+                            onChange={e => setContactTypes({ ...contactTypes, groups: e.target.checked })}
                         />
                         <div className="custom-checkbox"></div>
                         <Users size={16} />
@@ -223,7 +248,7 @@ function ContactsPage() {
                         <input
                             type="checkbox"
                             checked={contactTypes.officials}
-                            onChange={e => setContactTypes(prev => ({ ...prev, officials: e.target.checked }))}
+                            onChange={e => setContactTypes({ ...contactTypes, officials: e.target.checked })}
                         />
                         <div className="custom-checkbox"></div>
                         <MessageSquare size={16} />
@@ -234,50 +259,7 @@ function ContactsPage() {
                 <div className="contacts-count">
                     共 {filteredContacts.length} 个联系人
                 </div>
-            </div>
 
-            {/* 导出区域 */}
-            <div className="export-section">
-                <h3>导出通讯录</h3>
-
-                <div className="export-format">
-                    <label>导出格式：</label>
-                    <select value={exportFormat} onChange={e => setExportFormat(e.target.value as 'json' | 'csv' | 'vcf')}>
-                        <option value="json">JSON</option>
-                        <option value="csv">CSV</option>
-                        <option value="vcf">VCF (vCard)</option>
-                    </select>
-                </div>
-
-                <div className="export-options">
-                    <label>
-                        <input
-                            type="checkbox"
-                            checked={exportAvatars}
-                            onChange={e => setExportAvatars(e.target.checked)}
-                        />
-                        <span>导出头像</span>
-                    </label>
-                </div>
-
-                <div className="export-folder">
-                    <button onClick={selectExportFolder} className="folder-btn">
-                        <FolderOpen size={16} />
-                        <span>{exportFolder || '选择导出位置'}</span>
-                    </button>
-                </div>
-
-                <button
-                    className="export-action-btn"
-                    onClick={startExport}
-                    disabled={!exportFolder || isExporting}
-                >
-                    <Download size={16} />
-                    <span>{isExporting ? '导出中...' : '开始导出'}</span>
-                </button>
-            </div>
-
-            <div className="contacts-content">
                 {isLoading ? (
                     <div className="loading-state">
                         <Loader2 size={32} className="spin" />
@@ -312,6 +294,91 @@ function ContactsPage() {
                         ))}
                     </div>
                 )}
+            </div>
+
+            {/* 右侧：导出设置 */}
+            <div className="settings-panel">
+                <div className="panel-header">
+                    <h2>导出设置</h2>
+                </div>
+
+                <div className="settings-content">
+                    <div className="setting-section">
+                        <h3>导出格式</h3>
+                        <div className="format-select" ref={formatDropdownRef}>
+                            <button
+                                type="button"
+                                className={`select-trigger ${showFormatSelect ? 'open' : ''}`}
+                                onClick={() => setShowFormatSelect(!showFormatSelect)}
+                            >
+                                <span className="select-value">{getOptionLabel(exportFormat)}</span>
+                                <ChevronDown size={16} />
+                            </button>
+                            {showFormatSelect && (
+                                <div className="select-dropdown">
+                                    {exportFormatOptions.map(option => (
+                                        <button
+                                            key={option.value}
+                                            type="button"
+                                            className={`select-option ${exportFormat === option.value ? 'active' : ''}`}
+                                            onClick={() => {
+                                                setExportFormat(option.value as 'json' | 'csv' | 'vcf')
+                                                setShowFormatSelect(false)
+                                            }}
+                                        >
+                                            <span className="option-label">{option.label}</span>
+                                            <span className="option-desc">{option.desc}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="setting-section">
+                        <h3>导出选项</h3>
+                        <label className="checkbox-item">
+                            <input
+                                type="checkbox"
+                                checked={exportAvatars}
+                                onChange={e => setExportAvatars(e.target.checked)}
+                            />
+                            <span>导出头像</span>
+                        </label>
+                    </div>
+
+                    <div className="setting-section">
+                        <h3>导出位置</h3>
+                        <div className="export-path-display">
+                            <FolderOpen size={16} />
+                            <span>{exportFolder || '未设置'}</span>
+                        </div>
+                        <button className="select-folder-btn" onClick={selectExportFolder}>
+                            <FolderOpen size={16} />
+                            <span>选择导出目录</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div className="export-action">
+                    <button
+                        className="export-btn"
+                        onClick={startExport}
+                        disabled={!exportFolder || isExporting}
+                    >
+                        {isExporting ? (
+                            <>
+                                <Loader2 size={18} className="spin" />
+                                <span>导出中...</span>
+                            </>
+                        ) : (
+                            <>
+                                <Download size={18} />
+                                <span>开始导出</span>
+                            </>
+                        )}
+                    </button>
+                </div>
             </div>
         </div>
     )
