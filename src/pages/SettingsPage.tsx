@@ -96,6 +96,7 @@ function SettingsPage() {
   const [isClearingAnalyticsCache, setIsClearingAnalyticsCache] = useState(false)
   const [isClearingImageCache, setIsClearingImageCache] = useState(false)
   const [isClearingAllCache, setIsClearingAllCache] = useState(false)
+  const saveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   // 安全设置 state
   const [authEnabled, setAuthEnabled] = useState(false)
@@ -125,6 +126,9 @@ function SettingsPage() {
   useEffect(() => {
     loadConfig()
     loadAppVersion()
+    return () => {
+      Object.values(saveTimersRef.current).forEach((timer) => clearTimeout(timer))
+    }
   }, [])
 
   // 点击外部关闭下拉框
@@ -334,6 +338,12 @@ function SettingsPage() {
     imageAesKey: imageAesKey || ''
   })
 
+  const buildKeysFromInputs = (overrides?: { decryptKey?: string; imageXorKey?: string; imageAesKey?: string }): WxidKeys => ({
+    decryptKey: overrides?.decryptKey ?? decryptKey ?? '',
+    imageXorKey: parseImageXorKey(overrides?.imageXorKey ?? imageXorKey),
+    imageAesKey: overrides?.imageAesKey ?? imageAesKey ?? ''
+  })
+
   const buildKeysFromConfig = (wxidConfig: configService.WxidConfig | null): WxidKeys => ({
     decryptKey: wxidConfig?.decryptKey || '',
     imageXorKey: typeof wxidConfig?.imageXorKey === 'number' ? wxidConfig.imageXorKey : null,
@@ -444,7 +454,9 @@ function SettingsPage() {
     try {
       const result = await dialog.openFile({ title: '选择微信数据库根目录', properties: ['openDirectory'] })
       if (!result.canceled && result.filePaths.length > 0) {
-        setDbPath(result.filePaths[0])
+        const selectedPath = result.filePaths[0]
+        setDbPath(selectedPath)
+        await configService.setDbPath(selectedPath)
         showMessage('已选择数据库目录', true)
       }
     } catch (e: any) {
@@ -488,7 +500,9 @@ function SettingsPage() {
     try {
       const result = await dialog.openFile({ title: '选择缓存目录', properties: ['openDirectory'] })
       if (!result.canceled && result.filePaths.length > 0) {
-        setCachePath(result.filePaths[0])
+        const selectedPath = result.filePaths[0]
+        setCachePath(selectedPath)
+        await configService.setCachePath(selectedPath)
         showMessage('已选择缓存目录', true)
       }
     } catch (e: any) {
@@ -575,12 +589,25 @@ function SettingsPage() {
     handleAutoGetDbKey()
   }
 
-  // Helper to sync current keys to wxid config
-  const syncCurrentKeys = async () => {
-    const keys = buildKeysFromState()
+  // Debounce config writes to avoid excessive disk IO
+  const scheduleConfigSave = (key: string, task: () => Promise<void> | void, delay = 300) => {
+    const timers = saveTimersRef.current
+    if (timers[key]) {
+      clearTimeout(timers[key])
+    }
+    timers[key] = setTimeout(() => {
+      Promise.resolve(task()).catch((e) => {
+        console.error('保存配置失败:', e)
+      })
+    }, delay)
+  }
+
+  const syncCurrentKeys = async (options?: { decryptKey?: string; imageXorKey?: string; imageAesKey?: string; wxid?: string }) => {
+    const keys = buildKeysFromInputs(options)
     await syncKeysToConfig(keys)
-    if (wxid) {
-      await configService.setWxidConfig(wxid, {
+    const wxidToUse = options?.wxid ?? wxid
+    if (wxidToUse) {
+      await configService.setWxidConfig(wxidToUse, {
         decryptKey: keys.decryptKey,
         imageXorKey: typeof keys.imageXorKey === 'number' ? keys.imageXorKey : 0,
         imageAesKey: keys.imageAesKey
@@ -804,11 +831,12 @@ function SettingsPage() {
             type={showDecryptKey ? 'text' : 'password'}
             placeholder="例如: a1b2c3d4e5f6..."
             value={decryptKey}
-            onChange={(e) => setDecryptKey(e.target.value)}
-            onBlur={async () => {
-              if (decryptKey && decryptKey.length === 64) {
-                await syncCurrentKeys()
-                // showMessage('解密密钥已保存', true) 
+            onChange={(e) => {
+              const value = e.target.value
+              setDecryptKey(value)
+              if (value && value.length === 64) {
+                scheduleConfigSave('keys', () => syncCurrentKeys({ decryptKey: value }))
+                // showMessage('解密密钥已保存', true)
               }
             }}
           />
@@ -839,11 +867,14 @@ function SettingsPage() {
           type="text"
           placeholder="例如: C:\Users\xxx\Documents\xwechat_files"
           value={dbPath}
-          onChange={(e) => setDbPath(e.target.value)}
-          onBlur={async () => {
-            if (dbPath) {
-              await configService.setDbPath(dbPath)
-            }
+          onChange={(e) => {
+            const value = e.target.value
+            setDbPath(value)
+            scheduleConfigSave('dbPath', async () => {
+              if (value) {
+                await configService.setDbPath(value)
+              }
+            })
           }}
         />
         <div className="btn-row">
@@ -862,12 +893,15 @@ function SettingsPage() {
             type="text"
             placeholder="例如: wxid_xxxxxx"
             value={wxid}
-            onChange={(e) => setWxid(e.target.value)}
-            onBlur={async () => {
-              if (wxid) {
-                await configService.setMyWxid(wxid)
-                await syncCurrentKeys() // Sync keys to the new wxid entry
-              }
+            onChange={(e) => {
+              const value = e.target.value
+              setWxid(value)
+              scheduleConfigSave('wxid', async () => {
+                if (value) {
+                  await configService.setMyWxid(value)
+                  await syncCurrentKeys({ wxid: value }) // Sync keys to the new wxid entry
+                }
+              })
             }}
           />
         </div>
@@ -881,8 +915,14 @@ function SettingsPage() {
           type="text"
           placeholder="例如: 0xA4"
           value={imageXorKey}
-          onChange={(e) => setImageXorKey(e.target.value)}
-          onBlur={syncCurrentKeys}
+          onChange={(e) => {
+            const value = e.target.value
+            setImageXorKey(value)
+            const parsed = parseImageXorKey(value)
+            if (value === '' || parsed !== null) {
+              scheduleConfigSave('keys', () => syncCurrentKeys({ imageXorKey: value }))
+            }
+          }}
         />
       </div>
 
@@ -893,8 +933,11 @@ function SettingsPage() {
           type="text"
           placeholder="16 位 AES 密钥"
           value={imageAesKey}
-          onChange={(e) => setImageAesKey(e.target.value)}
-          onBlur={syncCurrentKeys}
+          onChange={(e) => {
+            const value = e.target.value
+            setImageAesKey(value)
+            scheduleConfigSave('keys', () => syncCurrentKeys({ imageAesKey: value }))
+          }}
         />
         <button className="btn btn-secondary btn-sm" onClick={handleAutoGetImageKey} disabled={isFetchingImageKey}>
           <Plug size={14} /> {isFetchingImageKey ? '获取中...' : '自动获取图片密钥'}
@@ -1009,8 +1052,11 @@ function SettingsPage() {
           type="text"
           placeholder="留空使用默认目录"
           value={whisperModelDir}
-          onChange={(e) => setWhisperModelDir(e.target.value)}
-          onBlur={() => configService.setWhisperModelDir(whisperModelDir)}
+          onChange={(e) => {
+            const value = e.target.value
+            setWhisperModelDir(value)
+            scheduleConfigSave('whisperModelDir', () => configService.setWhisperModelDir(value))
+          }}
         />
         <div className="btn-row">
           <button className="btn btn-secondary" onClick={handleSelectWhisperModelDir}><FolderOpen size={16} /> 选择目录</button>
@@ -1252,14 +1298,23 @@ function SettingsPage() {
           type="text"
           placeholder="留空使用默认目录"
           value={cachePath}
-          onChange={(e) => setCachePath(e.target.value)}
-          onBlur={async () => {
-            await configService.setCachePath(cachePath)
+          onChange={(e) => {
+            const value = e.target.value
+            setCachePath(value)
+            scheduleConfigSave('cachePath', () => configService.setCachePath(value))
           }}
         />
         <div className="btn-row">
           <button className="btn btn-secondary" onClick={handleSelectCachePath}><FolderOpen size={16} /> 浏览选择</button>
-          <button className="btn btn-secondary" onClick={() => setCachePath('')}><RotateCcw size={16} /> 恢复默认</button>
+          <button
+            className="btn btn-secondary"
+            onClick={async () => {
+              setCachePath('')
+              await configService.setCachePath('')
+            }}
+          >
+            <RotateCcw size={16} /> 恢复默认
+          </button>
         </div>
       </div>
 
